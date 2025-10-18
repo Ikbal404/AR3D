@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <title>AR 3D Model - Deteksi Lantai</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+
+    #notification {
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.7);
+      color: #fff;
+      padding: 10px 20px;
+      border-radius: 10px;
+      font-family: sans-serif;
+      display: none;
+      z-index: 10;
+    }
+
+    #arButton {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: #007bff;
+      color: white;
+      border: none;
+      border-radius: 12px;
+      padding: 12px 24px;
+      font-size: 16px;
+      cursor: pointer;
+      font-family: sans-serif;
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+      z-index: 10;
+      display: none;
+    }
+
+    #arButton:hover {
+      background-color: #0056b3;
+    }
+  </style>
+</head>
+<body>
+  <div id="notification">🚫 Tidak ada lantai terdeteksi</div>
+  <button id="arButton">Masuk ke Mode AR</button>
+
+  <!-- Three.js & WebXR -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/loaders/GLTFLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/ARButton.js"></script>
+
+  <script>
+    let camera, scene, renderer;
+    let reticle, controller;
+    let model = null;
+    const notification = document.getElementById('notification');
+    const customARButton = document.getElementById('arButton');
+
+    init();
+
+    async function init() {
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      // Cahaya
+      const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
+      light.position.set(0.5, 1, 0.25);
+      scene.add(light);
+
+      // Reticle (penanda lantai)
+      const ringGeo = new THREE.RingGeometry(0.1, 0.15, 32).rotateX(-Math.PI / 2);
+      const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+      reticle = new THREE.Mesh(ringGeo, ringMat);
+      reticle.matrixAutoUpdate = false;
+      reticle.visible = false;
+      scene.add(reticle);
+
+      // Controller
+      controller = renderer.xr.getController(0);
+      controller.addEventListener('select', onSelect);
+      scene.add(controller);
+
+      // Cek dukungan AR
+      if (navigator.xr) {
+        const supported = await navigator.xr.isSessionSupported('immersive-ar');
+        if (supported) {
+          customARButton.style.display = 'block';
+          customARButton.addEventListener('click', startAR);
+        } else {
+          customARButton.textContent = 'AR tidak didukung di perangkat ini';
+          customARButton.style.background = 'gray';
+          customARButton.style.display = 'block';
+        }
+      } else {
+        customARButton.textContent = 'Browser tidak mendukung WebXR';
+        customARButton.style.background = 'gray';
+        customARButton.style.display = 'block';
+      }
+
+      window.addEventListener('resize', onWindowResize);
+    }
+
+    async function startAR() {
+      if (!navigator.xr) {
+        alert("WebXR tidak didukung di browser ini.");
+        return;
+      }
+
+      try {
+        // Minta izin kamera dulu
+        await navigator.mediaDevices.getUserMedia({ video: true });
+
+        const session = await navigator.xr.requestSession('immersive-ar', {
+          requiredFeatures: ['hit-test', 'dom-overlay', 'camera-access'],
+          domOverlay: { root: document.body }
+        });
+
+        renderer.xr.setSession(session);
+
+        // Tambahkan cube test
+        const cube = new THREE.Mesh(
+          new THREE.BoxGeometry(0.1, 0.1, 0.1),
+          new THREE.MeshBasicMaterial({ color: 0xff0000 })
+        );
+        cube.position.set(0, 0, -0.5);
+        scene.add(cube);
+
+        notification.textContent = "✅ Mode AR aktif! Arahkan kamera ke lantai.";
+        notification.style.display = 'block';
+
+        animate();
+      } catch (err) {
+        console.error('Gagal memulai AR:', err);
+        alert('Gagal memulai AR. Periksa izin kamera & dukungan perangkat.');
+      }
+    }
+
+    function onSelect() {
+      if (reticle.visible) {
+        if (!model) {
+          const loader = new THREE.GLTFLoader();
+          loader.load(
+            './model.glb',
+            function (gltf) {
+              model = gltf.scene;
+              model.scale.set(0.01, 0.01, 0.01);
+              scene.add(model);
+              model.position.setFromMatrixPosition(reticle.matrix);
+              notification.style.display = 'none';
+            },
+            undefined,
+            function (error) {
+              console.error('Gagal memuat model:', error);
+            }
+          );
+        } else {
+          model.position.setFromMatrixPosition(reticle.matrix);
+          notification.style.display = 'none';
+        }
+      }
+    }
+
+    function animate() {
+      renderer.setAnimationLoop(render);
+    }
+
+    let hitTestSource = null;
+    let hitTestSourceRequested = false;
+
+    function render(timestamp, frame) {
+      if (frame) {
+        const referenceSpace = renderer.xr.getReferenceSpace();
+        const session = renderer.xr.getSession();
+
+        if (!hitTestSourceRequested) {
+          session.requestReferenceSpace('viewer').then((refSpace) => {
+            session.requestHitTestSource({ space: refSpace }).then((source) => {
+              hitTestSource = source;
+            });
+          });
+
+          session.addEventListener('end', () => {
+            hitTestSourceRequested = false;
+            hitTestSource = null;
+          });
+
+          hitTestSourceRequested = true;
+        }
+
+        if (hitTestSource) {
+          const hitTestResults = frame.getHitTestResults(hitTestSource);
+          if (hitTestResults.length) {
+            const hit = hitTestResults[0];
+            const pose = hit.getPose(referenceSpace);
+            reticle.visible = true;
+            reticle.matrix.fromArray(pose.transform.matrix);
+            notification.style.display = 'none';
+          } else {
+            reticle.visible = false;
+            notification.style.display = 'block';
+          }
+        }
+      }
+      renderer.render(scene, camera);
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+  </script>
+
+  <script>
+    if (!navigator.xr) {
+      alert("❌ Browser tidak mendukung WebXR");
+    } else {
+      navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+        if (!supported) {
+          alert("⚠️ AR tidak didukung di perangkat ini (pastikan ARCore aktif dan Chrome terbaru)");
+        }
+      });
+    }
+  </script>
+</body>
+</html>
