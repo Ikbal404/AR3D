@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <title>AR 3D Model - Debuggable</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    html,body { height: 100%; margin: 0; }
+    body { font-family: system-ui, -apple-system, Roboto, "Segoe UI", "Noto Sans", "Helvetica Neue", Arial; background: #fff; overflow: hidden; }
+    canvas { display: block; }
+
+    /* Notification kecil */
+    #notification {
+      position: fixed;
+      top: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.75);
+      color: #fff;
+      padding: 8px 14px;
+      border-radius: 10px;
+      font-size: 14px;
+      z-index: 50;
+      display: none;
+    }
+
+    /* Tombol AR */
+    #arButton {
+      position: fixed;
+      bottom: 22px;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: #007bff;
+      color: white;
+      border: none;
+      border-radius: 12px;
+      padding: 12px 26px;
+      font-size: 16px;
+      cursor: pointer;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.3);
+      z-index: 40;
+      display: none;
+    }
+    #arButton[disabled] { opacity: 0.6; cursor: not-allowed; }
+
+    /* Debug panel */
+    #debug {
+      position: fixed;
+      left: 12px;
+      top: 12px;
+      background: rgba(0,0,0,0.6);
+      color: #fff;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      z-index: 60;
+      max-width: calc(100% - 40px);
+      line-height: 1.35;
+    }
+    #debug b { color: #ffd; }
+
+    /* small helpers */
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div id="notification">🚫 Tidak ada lantai terdeteksi</div>
+  <button id="arButton">Masuk ke Mode AR</button>
+  <div id="debug" aria-hidden="true">
+    <div><b>WebXR:</b> <span id="dbg-xr">—</span></div>
+    <div><b>Session:</b> <span id="dbg-session">idle</span></div>
+    <div><b>Hit-test:</b> <span id="dbg-hittest">—</span></div>
+    <div><b>Camera feed (likely):</b> <span id="dbg-camera">—</span></div>
+    <div><b>Model:</b> <span id="dbg-model">not loaded</span></div>
+  </div>
+
+  <!-- Three + loaders (non-module versions, global THREE) -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/loaders/GLTFLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/webxr/ARButton.js"></script>
+
+  <script>
+    // UI elements
+    const notification = document.getElementById('notification');
+    const arButton = document.getElementById('arButton');
+    const dbgXR = document.getElementById('dbg-xr');
+    const dbgSession = document.getElementById('dbg-session');
+    const dbgHit = document.getElementById('dbg-hittest');
+    const dbgCam = document.getElementById('dbg-camera');
+    const dbgModel = document.getElementById('dbg-model');
+
+    // three scene vars
+    let camera, scene, renderer;
+    let reticle, controller, hitTestSource = null, hitTestSourceRequested = false;
+    let model = null;
+
+    // init Three scene (but not AR session yet)
+    function initThree() {
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      // lights
+      const hemi = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
+      scene.add(hemi);
+      const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+      dir.position.set(0, 3, 3);
+      scene.add(dir);
+
+      // reticle
+      const ringGeo = new THREE.RingGeometry(0.08, 0.12, 32).rotateX(-Math.PI/2);
+      const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ff88 });
+      reticle = new THREE.Mesh(ringGeo, ringMat);
+      reticle.matrixAutoUpdate = false;
+      reticle.visible = false;
+      scene.add(reticle);
+
+      // controller for select
+      controller = renderer.xr.getController(0);
+      controller.addEventListener('select', onSelect);
+      scene.add(controller);
+
+      window.addEventListener('resize', onWindowResize, false);
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // on user select, place model (or load if not loaded)
+    function onSelect() {
+      if (!reticle.visible) {
+        return;
+      }
+      if (!model) {
+        const loader = new THREE.GLTFLoader();
+        dbgModel.textContent = 'loading...';
+        loader.load(
+          './model.glb',
+          (gltf) => {
+            model = gltf.scene;
+            // initial scale — adjust if model is huge/small
+            model.scale.set(0.02, 0.02, 0.02);
+            model.position.setFromMatrixPosition(reticle.matrix);
+            scene.add(model);
+            dbgModel.textContent = 'loaded';
+            notification.style.display = 'none';
+            console.log('Model loaded:', gltf);
+          },
+          (xhr) => {
+            // progress optional
+            // console.log( ( xhr.loaded / xhr.total * 100 ) + '% loaded' );
+          },
+          (err) => {
+            console.error('Model loading error', err);
+            dbgModel.textContent = 'error';
+            alert('Gagal memuat model.glb. Pastikan file ada di root proyek.');
+          }
+        );
+      } else {
+        model.position.setFromMatrixPosition(reticle.matrix);
+      }
+    }
+
+    // render loop
+    function animate() {
+      renderer.setAnimationLoop(render);
+    }
+
+    function render(timestamp, frame) {
+      if (frame) {
+        const session = renderer.xr.getSession();
+        const referenceSpace = renderer.xr.getReferenceSpace();
+
+        // request hit test source once
+        if (!hitTestSourceRequested) {
+          if (session.requestReferenceSpace) {
+            session.requestReferenceSpace('viewer').then((refSpace) => {
+              session.requestHitTestSource({ space: refSpace }).then((source) => {
+                hitTestSource = source;
+                dbgHit.textContent = 'requested';
+              }).catch(err => {
+                console.warn('requestHitTestSource failed:', err);
+                dbgHit.textContent = 'not available';
+              });
+            }).catch(err => {
+              console.warn('requestReferenceSpace viewer failed', err);
+            });
+          }
+          session.addEventListener('end', () => {
+            hitTestSourceRequested = false;
+            hitTestSource = null;
+            dbgHit.textContent = 'stopped';
+            dbgSession.textContent = 'idle';
+            arButton.style.display = 'block'; // show the button again
+          });
+          hitTestSourceRequested = true;
+        }
+
+        if (hitTestSource) {
+          const results = frame.getHitTestResults(hitTestSource);
+          if (results.length > 0) {
+            const hit = results[0];
+            const pose = hit.getPose(referenceSpace);
+            reticle.visible = true;
+            reticle.matrix.fromArray(pose.transform.matrix);
+            notification.style.display = 'none';
+            dbgHit.textContent = 'found';
+          } else {
+            reticle.visible = false;
+            notification.style.display = 'block';
+            dbgHit.textContent = 'no results';
+          }
+        }
+      }
+
+      renderer.render(scene, camera);
+    }
+
+    // start AR session
+    async function startAR() {
+      if (!navigator.xr) {
+        alert('Browser tidak mendukung WebXR.');
+        return;
+      }
+
+      // hide button to prevent double clicks while we try
+      arButton.disabled = true;
+      arButton.style.display = 'none';
+      dbgSession.textContent = 'starting';
+
+      try {
+        // Request immersive-ar. We use dom-overlay as required (so our HTML overlays show)
+        // put hit-test as optional to avoid failing on devices that don't expose it as required
+        const session = await navigator.xr.requestSession('immersive-ar', {
+          requiredFeatures: ['dom-overlay'],
+          optionalFeatures: ['hit-test', 'light-estimation'],
+          domOverlay: { root: document.body }
+        });
+
+        dbgSession.textContent = 'running';
+        dbgXR.textContent = 'supported';
+        dbgCam.textContent = 'unknown (WebXR manages camera)';
+
+        // Attach session to renderer
+        await renderer.xr.setSession(session);
+
+        // Add a debug cube slightly in front of camera so user sees something if camera feed is missing
+        const debugCube = new THREE.Mesh(
+          new THREE.BoxGeometry(0.14, 0.14, 0.14),
+          new THREE.MeshBasicMaterial({ color: 0xff0000 })
+        );
+        // place it a bit forward in camera-local coords using a camera-attached object
+        const cameraHolder = new THREE.Object3D();
+        cameraHolder.position.set(0, 0, -0.6);
+        cameraHolder.add(debugCube);
+        // We add to camera so it always appears in front; then remove after short time if camera feed is visible
+        renderer.xr.getCamera(camera); // ensure XR camera created
+        scene.add(cameraHolder);
+
+        // after a short delay remove cameraHolder so it doesn't clutter (but keep for a few seconds)
+        setTimeout(() => {
+          if (cameraHolder.parent) scene.remove(cameraHolder);
+        }, 2500);
+
+        // make sure notification shows an instruction
+        notification.textContent = '✅ Mode AR aktif! Arahkan kamera ke lantai.';
+        notification.style.display = 'block';
+
+        // start render loop
+        animate();
+
+      } catch (err) {
+        console.error('Gagal memulai AR:', err);
+        alert('Gagal memulai AR. Pastikan Chrome terbaru & Google Play Services for AR terpasang. (' + (err && err.message ? err.message : '') + ')');
+        dbgSession.textContent = 'failed';
+        arButton.disabled = false;
+        arButton.style.display = 'block';
+      }
+    }
+
+    // initial checks and UI setup
+    async function start() {
+      initThree();
+
+      // Check WebXR support quickly
+      if (navigator.xr) {
+        try {
+          const supported = await navigator.xr.isSessionSupported('immersive-ar');
+          dbgXR.textContent = supported ? 'supported' : 'not supported';
+          if (supported) {
+            arButton.style.display = 'block';
+            arButton.addEventListener('click', startAR);
+          } else {
+            arButton.style.display = 'block';
+            arButton.textContent = 'AR tidak didukung';
+            arButton.disabled = true;
+          }
+        } catch (err) {
+          console.warn('isSessionSupported error', err);
+          dbgXR.textContent = 'error';
+          arButton.style.display = 'block';
+          arButton.textContent = 'AR status unknown';
+        }
+      } else {
+        dbgXR.textContent = 'not available';
+        arButton.style.display = 'block';
+        arButton.textContent = 'Browser tidak mendukung WebXR';
+        arButton.disabled = true;
+      }
+    }
+
+    // Kick things off
+    start();
+  </script>
+</body>
+</html>
